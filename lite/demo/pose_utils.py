@@ -29,16 +29,13 @@ def gaussian_blur(heatmaps: np.ndarray, kernel: int = 11) -> np.ndarray:
     """
     assert kernel % 2 == 1
 
-    border = (kernel - 1) // 2
     K, H, W = heatmaps.shape
 
+    origin_max = heatmaps.max(axis=(1, 2), keepdims=True)
     for k in range(K):
-        origin_max = np.max(heatmaps[k])
-        dr = np.zeros((H + 2 * border, W + 2 * border), dtype=np.float32)
-        dr[border:-border, border:-border] = heatmaps[k].copy()
-        dr = cv2.GaussianBlur(dr, (kernel, kernel), 0)
-        heatmaps[k] = dr[border:-border, border:-border].copy()
-        heatmaps[k] *= origin_max / np.max(heatmaps[k])
+        cv2.GaussianBlur(heatmaps[k], (kernel, kernel), 0, dst=heatmaps[k],
+                         borderType=cv2.BORDER_CONSTANT)
+    heatmaps *= origin_max / heatmaps.max(axis=(1, 2), keepdims=True)
     return heatmaps
 
 
@@ -115,23 +112,26 @@ def refine_keypoints_dark_udp(keypoints: np.ndarray, heatmaps: np.ndarray,
 
     # modulate heatmaps
     heatmaps = gaussian_blur(heatmaps, blur_kernel_size)
-    np.clip(heatmaps, 1e-3, 50., heatmaps)
-    np.log(heatmaps, heatmaps)
 
     heatmaps_pad = np.pad(
-        heatmaps, ((0, 0), (1, 1), (1, 1)), mode='edge').flatten()
+        heatmaps, ((0, 0), (1, 1), (1, 1)), mode='edge').reshape(-1)
+
+    # clip+log only the 7 taps each keypoint reads, instead of all K*H*W elements:
+    # both are elementwise, so the values gathered below are unchanged.
+    def tap(idx):
+        return np.log(np.clip(heatmaps_pad[idx], 1e-3, 50.))
 
     for n in range(N):
         index = keypoints[n, :, 0] + 1 + (keypoints[n, :, 1] + 1) * (W + 2)
         index += (W + 2) * (H + 2) * np.arange(0, K)
         index = index.astype(int).reshape(-1, 1)
-        i_ = heatmaps_pad[index]
-        ix1 = heatmaps_pad[index + 1]
-        iy1 = heatmaps_pad[index + W + 2]
-        ix1y1 = heatmaps_pad[index + W + 3]
-        ix1_y1_ = heatmaps_pad[index - W - 3]
-        ix1_ = heatmaps_pad[index - 1]
-        iy1_ = heatmaps_pad[index - 2 - W]
+        i_ = tap(index)
+        ix1 = tap(index + 1)
+        iy1 = tap(index + W + 2)
+        ix1y1 = tap(index + W + 3)
+        ix1_y1_ = tap(index - W - 3)
+        ix1_ = tap(index - 1)
+        iy1_ = tap(index - 2 - W)
 
         dx = 0.5 * (ix1 - ix1_)
         dy = 0.5 * (iy1 - iy1_)
@@ -310,3 +310,4 @@ def nms(dets: np.ndarray, thr: float):
         order = order[inds + 1]
 
     return keep
+

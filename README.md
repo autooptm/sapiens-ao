@@ -1,3 +1,67 @@
+<div align="center">
+  <a href="https://autooptm.com"><img src=".autooptm/logo.png" width="96" alt="AutoOptm"></a>
+
+  <h1>Sapiens · optimized by <a href="https://autooptm.com">AutoOptm</a></h1>
+
+  <p><b>3.75x faster end to end</b> on the command below, output verified against the stock program.</p>
+
+  <p>
+    <a href="https://autooptm.com"><img alt="speedup" src="https://img.shields.io/badge/end--to--end-3.75x-2ea44f"></a>
+    <a href="https://github.com/facebookresearch/sapiens/commit/2cb07227a740cf09896309ea3a3b8fa44429865c"><img alt="base" src="https://img.shields.io/badge/upstream-2cb07227a740-blue"></a>
+    <img alt="card" src="https://img.shields.io/badge/measured%20on-A10-lightgrey">
+  </p>
+</div>
+
+> This is a fork of [facebookresearch/sapiens](https://github.com/facebookresearch/sapiens) at commit
+> [`2cb07227a740`](https://github.com/facebookresearch/sapiens/commit/2cb07227a740cf09896309ea3a3b8fa44429865c) with the AutoOptm patch applied on top.
+> The optimisation was found, measured and verified automatically by [AutoOptm](https://autooptm.com);
+> the patch is also kept at [`.autooptm/autooptm.patch`](.autooptm/autooptm.patch).
+
+## The result
+
+| | |
+|---|---|
+| **Command** | `python lite/demo/vis_pose.py sapiens_0.3b_goliath_best_goliath_AP_573_torchscript.pt2 --input <frames> --output-root <out> --batch_size 4 --num_keypoints 308` |
+| **Entry point** | `lite/demo/vis_pose.py` |
+| **Unit measured** | one frame of 8 in-the-wild demo frames (`pose/demo/data/itw_videos/reel1`), run in batches of 4: read → per-person crop → Sapiens 0.3B 308-keypoint pose (TorchScript checkpoint) → keypoints decoded → result written to the output directory |
+| **Before (stock)** | 938 ms per frame (median of 3 runs) |
+| **After (this tree)** | 250 ms per frame (median of 9 runs; process start-up and the first, warm-up batch are not included in either arm) |
+| **Speedup** | **3.75x** end to end on A10, noise floor of the host 0.8% |
+| **Output** | the pose heatmaps stay within 0.011 (max abs) of the stock fp32 model's, PSNR 82.8 dB against them; within 0.014 on held-out batch sizes (2 and 6) the optimiser never saw; every run writes all 8 result files |
+
+### What changed
+
+| File | Where | Gain |
+|---|---|---|
+| `lite/demo/vis_pose.py` | main() -- model setup | — |
+| `lite/demo/vis_pose.py` | batch_inference_topdown() | — |
+| `lite/demo/vis_pose.py` | preprocess_pose() | — |
+| `lite/demo/vis_pose.py` | main() -- dataset construction and per-batch call | — |
+| `lite/demo/adhoc_image_dataset.py` | AdhocImageDataset.__init__ / __getitem__ | — |
+| `lite/demo/pose_utils.py` | gaussian_blur() | — |
+| `lite/demo/pose_utils.py` | refine_keypoints_dark_udp() | — |
+
+Gains per change were not recorded separately for this run; the 3.75x above is the whole patch, measured end to end.
+
+## Reproduce
+
+```bash
+git clone https://github.com/autooptm/sapiens-ao.git
+cd sapiens-ao
+# set up exactly as upstream documents for Sapiens-Lite (the 0.3B pose TorchScript checkpoint
+# from facebook/sapiens-pose-0.3b-torchscript, frames in a folder), then:
+python lite/demo/vis_pose.py sapiens_0.3b_goliath_best_goliath_AP_573_torchscript.pt2 --input <frames> --output-root <out> --batch_size 4 --num_keypoints 308
+```
+
+The diff against upstream is one commit: `git log -1 -p` shows it, and
+`git diff 2cb07227a740` is the same patch as `.autooptm/autooptm.patch`.
+
+---
+
+<div align="center"><sub>Optimized by <a href="https://autooptm.com">AutoOptm</a> — point it at a repository, get back a verified speedup and the patch.</sub></div>
+
+---
+
 <p align="center">
   <img src="./assets/sapiens_animation.gif" alt="Sapiens" title="Sapiens" width="500"/>
 </p>

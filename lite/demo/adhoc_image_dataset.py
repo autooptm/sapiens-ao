@@ -8,8 +8,9 @@ import torch
 import cv2
 
 class AdhocImageDataset(torch.utils.data.Dataset):
-    def __init__(self, image_list, shape=None, mean=None, std=None):
+    def __init__(self, image_list, shape=None, mean=None, std=None, return_preprocessed=True):
         self.image_list = image_list
+        self.return_preprocessed = return_preprocessed
         if shape:
             assert len(shape) == 2
         if mean or std:
@@ -38,6 +39,6 @@ class AdhocImageDataset(torch.utils.data.Dataset):
         orig_img_dir = self.image_list[idx]
         orig_img = cv2.imread(orig_img_dir)
         # orig_img = cv2.cvtColor(orig_img, cv2.COLOR_BGR2RGB)
-        img = self._preprocess(orig_img)
+        img = self._preprocess(orig_img) if self.return_preprocessed else torch.empty(0)
         return orig_img_dir, orig_img, img
         

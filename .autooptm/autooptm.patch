@@ -1,0 +1,169 @@
+diff --git a/lite/demo/adhoc_image_dataset.py b/lite/demo/adhoc_image_dataset.py
+index fcff03b..d75da46 100644
+--- a/lite/demo/adhoc_image_dataset.py
++++ b/lite/demo/adhoc_image_dataset.py
+@@ -8,8 +8,9 @@ import torch
+ import cv2
+ 
+ class AdhocImageDataset(torch.utils.data.Dataset):
+-    def __init__(self, image_list, shape=None, mean=None, std=None):
++    def __init__(self, image_list, shape=None, mean=None, std=None, return_preprocessed=True):
+         self.image_list = image_list
++        self.return_preprocessed = return_preprocessed
+         if shape:
+             assert len(shape) == 2
+         if mean or std:
+@@ -38,6 +39,6 @@ class AdhocImageDataset(torch.utils.data.Dataset):
+         orig_img_dir = self.image_list[idx]
+         orig_img = cv2.imread(orig_img_dir)
+         # orig_img = cv2.cvtColor(orig_img, cv2.COLOR_BGR2RGB)
+-        img = self._preprocess(orig_img)
++        img = self._preprocess(orig_img) if self.return_preprocessed else torch.empty(0)
+         return orig_img_dir, orig_img, img
+-        
+\ No newline at end of file
++        
+diff --git a/lite/demo/pose_utils.py b/lite/demo/pose_utils.py
+index e20ac46..36991f7 100644
+--- a/lite/demo/pose_utils.py
++++ b/lite/demo/pose_utils.py
+@@ -29,16 +29,13 @@ def gaussian_blur(heatmaps: np.ndarray, kernel: int = 11) -> np.ndarray:
+     """
+     assert kernel % 2 == 1
+ 
+-    border = (kernel - 1) // 2
+     K, H, W = heatmaps.shape
+ 
++    origin_max = heatmaps.max(axis=(1, 2), keepdims=True)
+     for k in range(K):
+-        origin_max = np.max(heatmaps[k])
+-        dr = np.zeros((H + 2 * border, W + 2 * border), dtype=np.float32)
+-        dr[border:-border, border:-border] = heatmaps[k].copy()
+-        dr = cv2.GaussianBlur(dr, (kernel, kernel), 0)
+-        heatmaps[k] = dr[border:-border, border:-border].copy()
+-        heatmaps[k] *= origin_max / np.max(heatmaps[k])
++        cv2.GaussianBlur(heatmaps[k], (kernel, kernel), 0, dst=heatmaps[k],
++                         borderType=cv2.BORDER_CONSTANT)
++    heatmaps *= origin_max / heatmaps.max(axis=(1, 2), keepdims=True)
+     return heatmaps
+ 
+ 
+@@ -115,23 +112,26 @@ def refine_keypoints_dark_udp(keypoints: np.ndarray, heatmaps: np.ndarray,
+ 
+     # modulate heatmaps
+     heatmaps = gaussian_blur(heatmaps, blur_kernel_size)
+-    np.clip(heatmaps, 1e-3, 50., heatmaps)
+-    np.log(heatmaps, heatmaps)
+ 
+     heatmaps_pad = np.pad(
+-        heatmaps, ((0, 0), (1, 1), (1, 1)), mode='edge').flatten()
++        heatmaps, ((0, 0), (1, 1), (1, 1)), mode='edge').reshape(-1)
++
++    # clip+log only the 7 taps each keypoint reads, instead of all K*H*W elements:
++    # both are elementwise, so the values gathered below are unchanged.
++    def tap(idx):
++        return np.log(np.clip(heatmaps_pad[idx], 1e-3, 50.))
+ 
+     for n in range(N):
+         index = keypoints[n, :, 0] + 1 + (keypoints[n, :, 1] + 1) * (W + 2)
+         index += (W + 2) * (H + 2) * np.arange(0, K)
+         index = index.astype(int).reshape(-1, 1)
+-        i_ = heatmaps_pad[index]
+-        ix1 = heatmaps_pad[index + 1]
+-        iy1 = heatmaps_pad[index + W + 2]
+-        ix1y1 = heatmaps_pad[index + W + 3]
+-        ix1_y1_ = heatmaps_pad[index - W - 3]
+-        ix1_ = heatmaps_pad[index - 1]
+-        iy1_ = heatmaps_pad[index - 2 - W]
++        i_ = tap(index)
++        ix1 = tap(index + 1)
++        iy1 = tap(index + W + 2)
++        ix1y1 = tap(index + W + 3)
++        ix1_y1_ = tap(index - W - 3)
++        ix1_ = tap(index - 1)
++        iy1_ = tap(index - 2 - W)
+ 
+         dx = 0.5 * (ix1 - ix1_)
+         dy = 0.5 * (iy1 - iy1_)
+@@ -310,3 +310,4 @@ def nms(dets: np.ndarray, thr: float):
+         order = order[inds + 1]
+ 
+     return keep
++
+diff --git a/lite/demo/vis_pose.py b/lite/demo/vis_pose.py
+index dceba2c..2ada137 100644
+--- a/lite/demo/vis_pose.py
++++ b/lite/demo/vis_pose.py
+@@ -61,7 +61,7 @@ def preprocess_pose(orig_img, bboxes_list, input_shape, mean, std):
+     centers = []
+     scales = []
+     for bbox in bboxes_list:
+-        img, center, scale = top_down_affine_transform(orig_img.copy(), bbox)
++        img, center, scale = top_down_affine_transform(orig_img, bbox)
+         img = cv2.resize(
+             img, (input_shape[1], input_shape[0]), interpolation=cv2.INTER_LINEAR
+         ).transpose(2, 0, 1)
+@@ -81,14 +81,18 @@ def batch_inference_topdown(
+     imgs: List[Union[np.ndarray, str]],
+     dtype=torch.bfloat16,
+     flip=False,
++    autocast=True,
+ ):
+-    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
+-        heatmaps = model(imgs.cuda())
++    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=autocast):
++        heatmaps = model(imgs.to(dtype).cuda())
+         if flip:
+             heatmaps_ = model(imgs.to(dtype).cuda().flip(-1))
+             heatmaps = (heatmaps + heatmaps_) * 0.5
+         imgs.cpu()
+-    return heatmaps.cpu()
++    out = torch.empty(heatmaps.shape, dtype=heatmaps.dtype, pin_memory=True)
++    out.copy_(heatmaps, non_blocking=True)
++    torch.cuda.synchronize()
++    return out
+ 
+ 
+ def img_save_and_vis(
+@@ -314,14 +318,14 @@ def main():
+     # build the model from a checkpoint file
+     pose_estimator = load_model(args.pose_checkpoint, USE_TORCHSCRIPT)
+ 
+-    ## no precision conversion needed for torchscript. run at fp32
+     if not USE_TORCHSCRIPT:
+         dtype = torch.half if args.fp16 else torch.bfloat16
+         pose_estimator.to(dtype)
+         pose_estimator = torch.compile(pose_estimator, mode="max-autotune", fullgraph=True)
+     else:
+-        dtype = torch.float32  # TorchScript models use float32
+-        pose_estimator = pose_estimator.to(args.device)
++        dtype = torch.half
++        pose_estimator = pose_estimator.to(args.device).to(dtype)
++        print(f"\033[92mTorchScript pose model running in {dtype}\033[0m")
+ 
+     global BATCH_SIZE
+     BATCH_SIZE = args.batch_size
+@@ -351,6 +355,7 @@ def main():
+     scale = args.heatmap_scale
+     inference_dataset = AdhocImageDataset(
+         [os.path.join(input_dir, img_name) for img_name in image_names],
++        return_preprocessed=False,  # this demo preprocesses per bbox in preprocess_pose
+     )  # do not provide preprocess args for detector as we use mmdet
+     inference_dataloader = torch.utils.data.DataLoader(
+         inference_dataset,
+@@ -431,7 +436,9 @@ def main():
+             valid_len = len(imgs)
+             imgs = fake_pad_images_to_batchsize(imgs)
+             pose_results.extend(
+-                batch_inference_topdown(pose_estimator, imgs, dtype=dtype)[:valid_len]
++                batch_inference_topdown(
++                    pose_estimator, imgs, dtype=dtype, autocast=not USE_TORCHSCRIPT
++                )[:valid_len]
+             )
+ 
+         batched_results = []
+@@ -483,3 +490,4 @@ def main():
+ 
+ if __name__ == "__main__":
+     main()
++

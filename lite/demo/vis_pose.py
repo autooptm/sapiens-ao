@@ -61,7 +61,7 @@ def preprocess_pose(orig_img, bboxes_list, input_shape, mean, std):
     centers = []
     scales = []
     for bbox in bboxes_list:
-        img, center, scale = top_down_affine_transform(orig_img.copy(), bbox)
+        img, center, scale = top_down_affine_transform(orig_img, bbox)
         img = cv2.resize(
             img, (input_shape[1], input_shape[0]), interpolation=cv2.INTER_LINEAR
         ).transpose(2, 0, 1)
@@ -81,14 +81,18 @@ def batch_inference_topdown(
     imgs: List[Union[np.ndarray, str]],
     dtype=torch.bfloat16,
     flip=False,
+    autocast=True,
 ):
-    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
-        heatmaps = model(imgs.cuda())
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype, enabled=autocast):
+        heatmaps = model(imgs.to(dtype).cuda())
         if flip:
             heatmaps_ = model(imgs.to(dtype).cuda().flip(-1))
             heatmaps = (heatmaps + heatmaps_) * 0.5
         imgs.cpu()
-    return heatmaps.cpu()
+    out = torch.empty(heatmaps.shape, dtype=heatmaps.dtype, pin_memory=True)
+    out.copy_(heatmaps, non_blocking=True)
+    torch.cuda.synchronize()
+    return out
 
 
 def img_save_and_vis(
@@ -314,14 +318,14 @@ def main():
     # build the model from a checkpoint file
     pose_estimator = load_model(args.pose_checkpoint, USE_TORCHSCRIPT)
 
-    ## no precision conversion needed for torchscript. run at fp32
     if not USE_TORCHSCRIPT:
         dtype = torch.half if args.fp16 else torch.bfloat16
         pose_estimator.to(dtype)
         pose_estimator = torch.compile(pose_estimator, mode="max-autotune", fullgraph=True)
     else:
-        dtype = torch.float32  # TorchScript models use float32
-        pose_estimator = pose_estimator.to(args.device)
+        dtype = torch.half
+        pose_estimator = pose_estimator.to(args.device).to(dtype)
+        print(f"\033[92mTorchScript pose model running in {dtype}\033[0m")
 
     global BATCH_SIZE
     BATCH_SIZE = args.batch_size
@@ -351,6 +355,7 @@ def main():
     scale = args.heatmap_scale
     inference_dataset = AdhocImageDataset(
         [os.path.join(input_dir, img_name) for img_name in image_names],
+        return_preprocessed=False,  # this demo preprocesses per bbox in preprocess_pose
     )  # do not provide preprocess args for detector as we use mmdet
     inference_dataloader = torch.utils.data.DataLoader(
         inference_dataset,
@@ -431,7 +436,9 @@ def main():
             valid_len = len(imgs)
             imgs = fake_pad_images_to_batchsize(imgs)
             pose_results.extend(
-                batch_inference_topdown(pose_estimator, imgs, dtype=dtype)[:valid_len]
+                batch_inference_topdown(
+                    pose_estimator, imgs, dtype=dtype, autocast=not USE_TORCHSCRIPT
+                )[:valid_len]
             )
 
         batched_results = []
@@ -483,3 +490,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
